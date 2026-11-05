@@ -472,13 +472,10 @@
         } catch (_) {}
       }
       if (!device) {
+        // Alle Geräte anzeigen, damit auch der Scooter 4 (anderer Name/verschlüsselt) auftaucht
         device = await navigator.bluetooth.requestDevice({
-          filters: [
-            { namePrefix: 'MI' }, { namePrefix: 'Mi' }, { namePrefix: 'Xiaomi' },
-            { namePrefix: 'NB' }, { namePrefix: 'Ninebot' }, { namePrefix: 'N3' },
-            { services: [NUS_SERVICE] }
-          ],
-          optionalServices: [NUS_SERVICE]
+          acceptAllDevices: true,
+          optionalServices: [NUS_SERVICE, 'battery_service', 'device_information']
         });
       }
       await connectDevice(device);
@@ -500,7 +497,7 @@
     state.ble.device = device;
     state.ble.name = device.name || 'Xiaomi/Ninebot';
     try { localStorage.setItem(LS_DEVICE, device.id || state.ble.name); } catch (_) {}
-    device.addEventListener('gattserverdisconnected', onDisconnected);
+    if (!device.__xfListener) { device.addEventListener('gattserverdisconnected', onDisconnected); device.__xfListener = true; }
     scanMsg('GATT wird aufgebaut…');
     const server = await device.gatt.connect();
     state.ble.server = server;
@@ -508,15 +505,30 @@
     try {
       service = await server.getPrimaryService(NUS_SERVICE);
     } catch (err) {
-      await safeDisconnect(false);
-      if (model.encrypted) {
-        scanMsg(`${model.name}: BLE verschlüsselt / kein Nordic UART. Demo + Config-Export nutzen.`, 'warn');
-      } else scanMsg('Nordic-UART-Service nicht gefunden.', 'error');
-      // Still allow entering app in limited mode
+      // Kein offener Xiaomi-Datenkanal (z.B. Scooter 4): Verbindung trotzdem halten,
+      // Name + Status anzeigen und Standard-Akku-Dienst versuchen.
+      state.ble.connected = true;
+      state.ble.reconnecting = false;
+      state.ble.backoff = 1000;
+      state.ble.limited = true;
+      stopDemoTimersOnly();
       enterApp();
-      setDashMode('idle');
+      setDashMode('live');
+      updateMein();
+      scanMsg(`Verbunden: ${state.ble.name}` + (model.encrypted ? ' (Scooter 4: Live-Tempo verschlüsselt, Verbindung + Status aktiv)' : ' (eingeschränkter Modus)'), 'warn');
+      try {
+        const bsvc = await server.getPrimaryService('battery_service');
+        const bch = await bsvc.getCharacteristic('battery_level');
+        const v = await bch.readValue();
+        applyTelemetry({ battery: v.getUint8(0) });
+        try {
+          await bch.startNotifications();
+          bch.addEventListener('characteristicvaluechanged', (e) => applyTelemetry({ battery: e.target.value.getUint8(0) }));
+        } catch (_) {}
+      } catch (_) {}
       return;
     }
+    state.ble.limited = false;
     state.ble.writeChar = await service.getCharacteristic(NUS_RX);
     state.ble.notifyChar = await service.getCharacteristic(NUS_TX);
     await state.ble.notifyChar.startNotifications();
