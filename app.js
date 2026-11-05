@@ -463,22 +463,18 @@
     $('scanTitle').textContent = 'Suche nach Scootern…';
     scanMsg('Geräteauswahl öffnen…');
     try {
-      let device = null;
-      if (navigator.bluetooth.getDevices) {
-        try {
-          const remembered = await navigator.bluetooth.getDevices();
-          const lastId = localStorage.getItem(LS_DEVICE);
-          device = remembered.find((d) => d.id === lastId) || null;
-        } catch (_) {}
+      // Immer die Geräteauswahl öffnen (zuverlässiger als gemerkte Geräte, v.a. in Bluefy)
+      if (state.ble.device && state.ble.device.gatt && state.ble.device.gatt.connected) {
+        try { state.ble.device.gatt.disconnect(); } catch (_) {}
       }
-      if (!device) {
-        // Alle Geräte anzeigen, damit auch der Scooter 4 (anderer Name/verschlüsselt) auftaucht
-        device = await navigator.bluetooth.requestDevice({
-          acceptAllDevices: true,
-          optionalServices: [NUS_SERVICE, 'battery_service', 'device_information']
-        });
-      }
-      await connectDevice(device);
+      state.ble.wantConnect = false;
+      if (state.ble.reconnectTimer) { clearTimeout(state.ble.reconnectTimer); state.ble.reconnectTimer = null; }
+      state.ble.reconnecting = false;
+      const device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [NUS_SERVICE, 'battery_service', 'device_information']
+      });
+      await withTimeout(connectDevice(device), 15000, 'Scooter antwortet nicht. Xiaomi Home App / andere Tabs schließen, Scooter aus- und einschalten, nochmal versuchen.');
     } catch (err) {
       if (err && err.name === 'NotFoundError') scanMsg('Keine Auswahl / Abbruch.', 'warn');
       else {
@@ -489,6 +485,10 @@
       state.scanning = false;
       $('btnScan').classList.remove('scanning');
     }
+  }
+
+  function withTimeout(p, ms, msg) {
+    return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
   }
 
   async function connectDevice(device) {
