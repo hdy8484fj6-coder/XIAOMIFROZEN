@@ -515,6 +515,7 @@
       enterApp();
       setDashMode('live');
       updateMein();
+      if (!gpsOn()) startGps();
       scanMsg(`Verbunden: ${state.ble.name}` + (model.encrypted ? ' (Scooter 4: Live-Tempo verschlüsselt, Verbindung + Status aktiv)' : ' (eingeschränkter Modus)'), 'warn');
       try {
         const bsvc = await server.getPrimaryService('battery_service');
@@ -665,6 +666,48 @@
     $('scanTitle').textContent = 'Suche nach Scootern…';
   }
 
+  // —— GPS-Live-Tacho (funktioniert mit jedem Scooter, auch Scooter 4) ——
+  const gps = { watch:null, last:null, smooth:0 };
+  function gpsDist(a, b) {
+    const R = 6371000, r = Math.PI / 180;
+    const dLat = (b.latitude - a.latitude) * r, dLon = (b.longitude - a.longitude) * r;
+    const x = Math.sin(dLat/2)**2 + Math.cos(a.latitude*r)*Math.cos(b.latitude*r)*Math.sin(dLon/2)**2;
+    return 2 * R * Math.asin(Math.sqrt(x));
+  }
+  function onGps(pos) {
+    const c = pos.coords;
+    let kmh = (c.speed != null && !isNaN(c.speed) && c.speed >= 0) ? c.speed * 3.6 : null;
+    if (kmh == null && gps.last) {
+      const dt = (pos.timestamp - gps.last.t) / 1000;
+      if (dt > 0.5) kmh = (gpsDist(gps.last.c, c) / dt) * 3.6;
+    }
+    gps.last = { c, t: pos.timestamp };
+    if (kmh == null) kmh = 0;
+    if (kmh < 1) kmh = 0;
+    gps.smooth = gps.smooth * 0.4 + kmh * 0.6;
+    $('gpsInfo').textContent = `GPS aktiv · ±${Math.round(c.accuracy)} m`;
+    const pill = $('gaugePill'); pill.textContent = 'Live GPS'; pill.classList.remove('demo'); pill.classList.add('live');
+    $('dashModeChip').textContent = 'Live';
+    applyTelemetry({ speed: Math.round(gps.smooth * 10) / 10 });
+  }
+  function startGps() {
+    if (!navigator.geolocation) { $('gpsInfo').textContent = 'GPS nicht verfügbar'; return; }
+    if (state.demo.on) { try { stopDemo(); } catch (_) { stopDemoTimersOnly(); } }
+    $('gpsInfo').textContent = 'GPS sucht…';
+    gps.watch = navigator.geolocation.watchPosition(onGps, (e) => {
+      $('gpsInfo').textContent = e.code === 1 ? 'Standort erlauben (Einstellungen → Bluefy → Standort)' : 'GPS-Fehler, draußen besser';
+    }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+    $('btnGps').textContent = 'GPS-Tacho stoppen';
+  }
+  function stopGps() {
+    if (gps.watch != null) navigator.geolocation.clearWatch(gps.watch);
+    gps.watch = null; gps.last = null; gps.smooth = 0;
+    $('btnGps').textContent = 'GPS-Tacho starten';
+    $('gpsInfo').textContent = 'GPS aus';
+    applyTelemetry({ speed: 0 });
+  }
+  function gpsOn() { return gps.watch != null; }
+
   // —— Rides ——
   function loadRides() { try { return JSON.parse(localStorage.getItem(LS_RIDES) || '[]'); } catch { return []; } }
   function saveRides(list) { localStorage.setItem(LS_RIDES, JSON.stringify(list.slice(0, 50))); }
@@ -722,7 +765,7 @@
     state.ride = { active:true, t0:Date.now(), dist:0, maxSpd:0, sumSpd:0, samples:0, batt0:state.telemetry.battery, timer:null };
     state.lastTick = performance.now();
     $('btnRideStart').disabled = true; $('btnRideStop').disabled = false;
-    if (!state.ble.connected && !state.demo.on) startDemo();
+    if (!state.ble.connected && !state.demo.on && !gpsOn()) startGps();
     state.ride.timer = setInterval(() => renderRideLive(state.telemetry.battery), 500);
   }
   function stopRide() {
@@ -830,6 +873,7 @@
     });
     $('btnDisconnect').addEventListener('click', () => safeDisconnect(true));
     $('btnRideStart').addEventListener('click', startRide);
+    $('btnGps').addEventListener('click', () => gpsOn() ? stopGps() : startGps());
     $('btnRideStop').addEventListener('click', stopRide);
     $('btnRideClear').addEventListener('click', () => { saveRides([]); renderHistory(); });
     document.querySelectorAll('[data-flash]').forEach((btn) => {
